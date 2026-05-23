@@ -1,8 +1,8 @@
-"""AgenticPlug session management.
+"""AgenticPlug session-file loader.
 
 Reads the session JSON produced by ``agenticplug login`` (GitHub Device Flow).
-The session lives at ``~/.config/agenticplug/session.json`` and is owned/rotated
-by the AgenticPlug CLI. ecoseek-client only consumes it as a client.
+The session lives at ``~/.config/agenticplug/session.json`` and is owned and
+rotated by the AgenticPlug CLI. ecoseek-client consumes it read-only.
 
 Session format (v2):
 {
@@ -22,25 +22,24 @@ Session format (v2):
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from ecoseek_client.config import get_agenticplug_session_file
-
 LOGIN_HINT = (
     "Run `agenticplug login` to create a session, then `agenticplug whoami` "
-    "to confirm it. See docs/agenticplug.md for setup."
+    "to confirm it. See docs/agenticplug_device_flow.md for setup."
 )
 
 
-class SessionError(Exception):
+class AgenticPlugSessionError(Exception):
     """Raised when a session file is missing, unreadable, or invalid."""
 
 
 @dataclass
-class Session:
+class AgenticPlugSession:
     """Parsed view of ``~/.config/agenticplug/session.json``."""
 
     path: Path
@@ -58,10 +57,9 @@ class Session:
 
     @property
     def identity(self) -> Optional[str]:
-        """Best-effort human-readable identity (GitHub login)."""
         if not isinstance(self.user, dict):
             return None
-        return self.user.get("login") or self.user.get("name") or self.user.get("id")
+        return self.user.get("login") or self.user.get("name") or str(self.user.get("id", ""))
 
     @property
     def login(self) -> Optional[str]:
@@ -106,14 +104,9 @@ class Session:
         return exp_dt <= current
 
     def authorization_header(self) -> Optional[str]:
-        """Build the Authorization header value."""
         if not self.token:
             return None
         return f"{self.token_type or 'Bearer'} {self.token}"
-
-
-# Alias for the agenticplug provider
-AgenticPlugSession = Session
 
 
 def _parse_expires_at(expires_raw: Any) -> tuple[Optional[str], Optional[int]]:
@@ -137,29 +130,34 @@ def _parse_expires_at(expires_raw: Any) -> tuple[Optional[str], Optional[int]]:
     return str(expires_raw), None
 
 
-def load_session(path: Optional[Path] = None) -> Session:
-    """Load and parse the AgenticPlug session file.
+def default_session_path() -> Path:
+    override = os.environ.get("AGENTICPLUG_SESSION_FILE")
+    if override:
+        return Path(override).expanduser()
+    return Path.home() / ".config" / "agenticplug" / "session.json"
 
-    Raises ``SessionError`` with an actionable hint on any failure.
-    """
-    resolved = Path(path).expanduser() if path else get_agenticplug_session_file()
+
+def load_session(path: Optional[Path] = None) -> AgenticPlugSession:
+    resolved = Path(path).expanduser() if path else default_session_path()
     if not resolved.exists():
-        raise SessionError(
+        raise AgenticPlugSessionError(
             f"AgenticPlug session not found at {resolved}. {LOGIN_HINT}"
         )
     try:
         data = json.loads(resolved.read_text())
     except json.JSONDecodeError as exc:
-        raise SessionError(
-            f"Session at {resolved} is not valid JSON: {exc}. {LOGIN_HINT}"
+        raise AgenticPlugSessionError(
+            f"AgenticPlug session at {resolved} is not valid JSON: {exc}. {LOGIN_HINT}"
         ) from exc
     except OSError as exc:
-        raise SessionError(
-            f"Cannot read session at {resolved}: {exc}. {LOGIN_HINT}"
+        raise AgenticPlugSessionError(
+            f"Cannot read AgenticPlug session at {resolved}: {exc}. {LOGIN_HINT}"
         ) from exc
 
     if not isinstance(data, dict):
-        raise SessionError(f"Session must be a JSON object. {LOGIN_HINT}")
+        raise AgenticPlugSessionError(
+            f"AgenticPlug session at {resolved} must be a JSON object. {LOGIN_HINT}"
+        )
 
     # v2 session format: token is at session.id
     session_data = data.get("session") or {}
@@ -180,7 +178,7 @@ def load_session(path: Optional[Path] = None) -> Session:
     if not isinstance(user, dict):
         user = {}
 
-    return Session(
+    return AgenticPlugSession(
         path=resolved,
         base_url=data.get("broker_url") or data.get("base_url"),
         token=token,
@@ -196,11 +194,10 @@ def load_session(path: Optional[Path] = None) -> Session:
     )
 
 
-def load_session_or_none(path: Optional[Path] = None) -> Optional[Session]:
-    """Same as ``load_session`` but returns ``None`` when file is absent."""
+def load_session_or_none(path: Optional[Path] = None) -> Optional[AgenticPlugSession]:
     try:
         return load_session(path)
-    except SessionError as exc:
+    except AgenticPlugSessionError as exc:
         if "not found" in str(exc):
             return None
         raise

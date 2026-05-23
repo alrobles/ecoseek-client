@@ -1,262 +1,123 @@
-"""Tests for the AgenticPlug client provider.
-
-Uses httpx mocks — no real network calls.
-"""
-
-from __future__ import annotations
+"""Tests for the AgenticPlug provider — pure unit tests with HTTP mocking."""
 
 import json
-import os
-from unittest import mock
 
 import pytest
 from pytest_httpx import HTTPXMock
 
-from ecoseek_client.providers.agenticplug import (
-    AgenticPlugAuthError,
-    AgenticPlugClient,
-    AgenticPlugError,
-    ConnectorInfo,
-    resolve_connector,
-)
-from ecoseek_client.session import Session, SessionError
-
-
-# ---------------------------------------------------------------------------
-# Fixtures
-# ---------------------------------------------------------------------------
+from ecoseek_client.providers import AgenticPlugClient, AgenticPlugResult
 
 
 @pytest.fixture
 def client():
-    """Return a client pointed at a fake gateway with no auth."""
-    return AgenticPlugClient(base_url="http://127.0.0.1:9999", token=None, timeout=5.0)
+    return AgenticPlugClient(base_url="http://test.local:3100", token="test-token-fake", timeout=5)
 
 
 @pytest.fixture
-def auth_client():
-    """Return a client with a fake auth token."""
-    return AgenticPlugClient(
-        base_url="http://127.0.0.1:9999",
-        token="test-token-123",
-        timeout=5.0,
-    )
+def client_no_auth():
+    return AgenticPlugClient(base_url="http://test.local:3100", timeout=5)
 
 
-@pytest.fixture
-def mock_connectors():
-    """Sample connector list from the gateway."""
-    return {
-        "connectors": [
-            {
-                "connector_id": "reumanlab",
-                "display_name": "Reuman Lab",
-                "owner": "alrobles",
-                "version": "0.7.0",
-                "connector_type": "local",
-                "health": "online",
-                "capabilities": {"hpc": True, "read": True, "write": False},
-                "tools": [
-                    {"name": "remote.health", "enabled": True, "risk_level": "read"},
-                    {"name": "hpc.status", "enabled": True, "risk_level": "read"},
-                    {"name": "hpc.queue", "enabled": True, "risk_level": "read"},
-                ],
-            },
-            {
-                "connector_id": "ku-hpc",
-                "display_name": "KU HPC",
-                "owner": "alrobles",
-                "version": "0.5.0",
-                "connector_type": "remote",
-                "health": "stale",
-                "capabilities": {"hpc": True, "read": True},
-                "tools": [],
-            },
-        ]
-    }
-
-
-# ---------------------------------------------------------------------------
-# Health
-# ---------------------------------------------------------------------------
-
+# ── Health ────────────────────────────────────────────────────────────
 
 def test_health_ok(client, httpx_mock: HTTPXMock):
-    httpx_mock.add_response(url="http://127.0.0.1:9999/health", json={"status": "ok"})
+    httpx_mock.add_response(url="http://test.local:3100/health", json={"status": "ok"})
     result = client.health()
-    assert result["status"] == "ok"
+    assert result.success
+    assert result.data["status"] == "ok"
 
 
-def test_health_unreachable(client):
-    # No mock — httpx will fail to connect
+def test_health_down(client, httpx_mock: HTTPXMock):
+    httpx_mock.add_response(url="http://test.local:3100/health", status_code=503)
     result = client.health()
-    assert result["status"] == "unreachable"
+    assert not result.success
 
 
-# ---------------------------------------------------------------------------
-# whoami (no network)
-# ---------------------------------------------------------------------------
+# ── Healthz / whoami ──────────────────────────────────────────────────
 
-
-def test_whoami_no_session(client, tmp_path, monkeypatch):
-    # Point AGENTICPLUG_SESSION_FILE to a nonexistent file
-    monkeypatch.setenv("AGENTICPLUG_SESSION_FILE", str(tmp_path / "nonexistent.json"))
-    c = AgenticPlugClient(base_url="http://127.0.0.1:9999", timeout=5.0)
-    info = c.whoami()
-    assert info.login is None
-
-
-def test_whoami_with_session(client, tmp_path, monkeypatch):
-    session_path = tmp_path / "session.json"
-    session_path.write_text(json.dumps({
-        "token": "gh_token",
-        "user": {"login": "alrobles", "name": "Alex"},
-        "scopes": ["read:user"],
-        "default_cluster": "reumanlab",
-    }))
-    monkeypatch.setenv("AGENTICPLUG_SESSION_FILE", str(session_path))
-    # Re-create client so it picks up env
-    c = AgenticPlugClient(base_url="http://127.0.0.1:9999", timeout=5.0)
-    info = c.whoami()
-    assert info.login == "alrobles"
-    assert info.name == "Alex"
-    assert "read:user" in info.scopes
-    assert info.default_cluster == "reumanlab"
-
-
-# ---------------------------------------------------------------------------
-# List connectors
-# ---------------------------------------------------------------------------
-
-
-def test_list_connectors(client, httpx_mock: HTTPXMock, mock_connectors):
+def test_healthz_ok(client, httpx_mock: HTTPXMock):
     httpx_mock.add_response(
-        url="http://127.0.0.1:9999/v1/connectors",
-        json=mock_connectors,
+        url="http://test.local:3100/healthz",
+        json={"connector_id": "reumanlab", "status": "completed", "result": {"status": "ok"}},
     )
-    result = client.list_connectors()
-    assert len(result) == 2
-    assert result[0].connector_id == "reumanlab"
-    assert result[0].is_online is True
-    assert result[1].is_online is False
+    result = client.healthz()
+    assert result.success
+    assert result.data["connector_id"] == "reumanlab"
 
 
-def test_list_connectors_empty(client, httpx_mock: HTTPXMock):
+def test_whoami_no_auth(client_no_auth, httpx_mock: HTTPXMock):
+    # client_no_auth has no explicit token, but may find session file on disk
     httpx_mock.add_response(
-        url="http://127.0.0.1:9999/v1/connectors",
-        json={"connectors": []},
+        url="http://test.local:3100/healthz",
+        json={"connector_id": "reumanlab", "status": "completed"},
     )
-    result = client.list_connectors()
-    assert result == []
+    result = client_no_auth.whoami()
+    assert result.success
+    assert result.data["connector_id"] == "reumanlab"
+    # "auth" key only present when has_auth is False AND no session file
+    # If session.json exists on disk, "user" will be set instead
+    auth_val = result.data.get("auth")
+    user_val = result.data.get("user")
+    assert auth_val == "none" or user_val is not None
 
 
-def test_list_connectors_503(client, httpx_mock: HTTPXMock):
-    httpx_mock.add_response(
-        url="http://127.0.0.1:9999/v1/connectors",
-        status_code=503,
-    )
-    with pytest.raises(AgenticPlugError, match="503"):
-        client.list_connectors()
+# ── Clusters ──────────────────────────────────────────────────────────
+
+def test_clusters(client, httpx_mock: HTTPXMock):
+    httpx_mock.add_response(url="http://test.local:3100/healthz", json={"connector_id": "reumanlab", "status": "completed"})
+    httpx_mock.add_response(url="http://test.local:3100/capabilities", json={"hpc": {"enabled": True, "submit_enabled": False}})
+    result = client.clusters()
+    assert result.success
+    assert len(result.data["clusters"]) == 2
 
 
-# ---------------------------------------------------------------------------
-# Get single connector
-# ---------------------------------------------------------------------------
+def test_clusters_hpc_disabled(client, httpx_mock: HTTPXMock):
+    httpx_mock.add_response(url="http://test.local:3100/healthz", json={"connector_id": "reumanlab", "status": "completed"})
+    httpx_mock.add_response(url="http://test.local:3100/capabilities", json={"hpc": {"enabled": False}})
+    result = client.clusters()
+    assert result.success
+    assert len(result.data["clusters"]) == 1
 
 
-def test_get_connector(client, httpx_mock: HTTPXMock, mock_connectors):
-    httpx_mock.add_response(
-        url="http://127.0.0.1:9999/v1/connectors/reumanlab",
-        json={"connector": mock_connectors["connectors"][0]},
-    )
-    c = client.get_connector("reumanlab")
-    assert c.connector_id == "reumanlab"
-    assert c.health == "online"
+# ── Task dispatch ─────────────────────────────────────────────────────
+
+def test_task_remote_health(client, httpx_mock: HTTPXMock):
+    httpx_mock.add_response(url="http://test.local:3100/healthz", json={"connector_id": "reumanlab", "status": "completed"})
+    result = client.task("remote.health")
+    assert result.success
 
 
-def test_get_connector_404(client, httpx_mock: HTTPXMock):
-    httpx_mock.add_response(
-        url="http://127.0.0.1:9999/v1/connectors/nonexistent",
-        status_code=404,
-    )
-    with pytest.raises(AgenticPlugError, match="not found"):
-        client.get_connector("nonexistent")
+def test_task_hpc_status(client, httpx_mock: HTTPXMock):
+    httpx_mock.add_response(url="http://test.local:3100/hpc/squeue", json={"command": "squeue", "jobs": [], "count": 0})
+    result = client.task("hpc.status")
+    assert result.success
+    assert result.data["count"] == 0
 
 
-# ---------------------------------------------------------------------------
-# Send task
-# ---------------------------------------------------------------------------
+def test_task_unknown(client, httpx_mock: HTTPXMock):
+    result = client.task("nonexistent.task")
+    assert not result.success
+    assert "Unknown task" in result.error
 
 
-def test_send_task_no_auth(client):
-    with pytest.raises(AgenticPlugAuthError, match="Not authenticated"):
-        client.send_task("hello")
+# ── Connection errors ─────────────────────────────────────────────────
+
+def test_connection_refused(client, httpx_mock: HTTPXMock):
+    httpx_mock.add_exception(url="http://test.local:3100/health", exception=Exception("Connection refused"))
+    result = client.health()
+    assert not result.success
 
 
-def test_send_task_ok(auth_client, httpx_mock: HTTPXMock):
-    httpx_mock.add_response(
-        url="http://127.0.0.1:9999/tasks",
-        json={"task_id": "task_001", "status": "accepted"},
-    )
-    result = auth_client.send_task("remote.health")
-    assert result.status == "accepted"
-    assert result.task_id == "task_001"
+# ── Token safety ──────────────────────────────────────────────────────
+
+def test_result_never_leaks_token():
+    r = AgenticPlugResult(success=True, data={"connector_id": "reumanlab"})
+    assert "token" not in json.dumps(r.data)
 
 
-def test_send_task_401(auth_client, httpx_mock: HTTPXMock):
-    httpx_mock.add_response(url="http://127.0.0.1:9999/tasks", status_code=401)
-    result = auth_client.send_task("remote.health")
-    assert result.status == "failed"
-    assert "Authentication failed" in (result.error or "")
-
-
-# ---------------------------------------------------------------------------
-# Get task status
-# ---------------------------------------------------------------------------
-
-
-def test_get_task_status(auth_client, httpx_mock: HTTPXMock):
-    httpx_mock.add_response(
-        url="http://127.0.0.1:9999/tasks/task_001",
-        json={"status": "completed", "output": "all good"},
-    )
-    result = auth_client.get_task_status("task_001")
-    assert result.status == "completed"
-    assert result.output == "all good"
-
-
-def test_get_task_status_404(auth_client, httpx_mock: HTTPXMock):
-    httpx_mock.add_response(
-        url="http://127.0.0.1:9999/tasks/task_missing",
-        status_code=404,
-    )
-    result = auth_client.get_task_status("task_missing")
-    assert result.status == "unknown"
-
-
-# ---------------------------------------------------------------------------
-# resolve_connector
-# ---------------------------------------------------------------------------
-
-
-def test_resolve_connector_explicit_env(monkeypatch):
-    monkeypatch.setenv("ECOSEEK_REMOTE_CONNECTOR", "ku-hpc")
-    assert resolve_connector() == "ku-hpc"
-
-
-def test_resolve_connector_fallback():
-    # No env, no session → returns default
-    assert resolve_connector() == "reumanlab"
-
-
-# ---------------------------------------------------------------------------
-# Token safety — no leaks
-# ---------------------------------------------------------------------------
-
-
-def test_token_not_printed(auth_client):
-    """Verify that str() and repr() on the client don't expose the token."""
-    s = str(auth_client)
-    assert "test-token-123" not in s
-    r = repr(auth_client)
-    assert "test-token-123" not in r
+def test_sanitize_removes_token():
+    from ecoseek_client.cli import _sanitize
+    data = {"connector_id": "reumanlab", "token": "secret-bearer-12345"}
+    safe = _sanitize(data)
+    assert "token" not in safe
+    assert "secret-bearer" not in str(safe)

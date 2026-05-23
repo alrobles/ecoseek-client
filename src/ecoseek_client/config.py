@@ -1,7 +1,7 @@
 """Configuration loader for ecoseek-client.
 
-Reads environment variables and optional .env file.
-Never stores secrets — all sensitive values come from the environment.
+Reads environment variables and optional .env files. All secrets stay local;
+nothing is hardcoded or committed.
 """
 
 from __future__ import annotations
@@ -24,12 +24,12 @@ AGENTICPLUG_VERIFY_SSL: bool = os.getenv("AGENTICPLUG_VERIFY_SSL", "1").lower() 
 ECOSEEK_REMOTE_CONNECTOR: Optional[str] = os.getenv("ECOSEEK_REMOTE_CONNECTOR")
 
 # ---------------------------------------------------------------------------
-# Env-loading (no dotenv dependency — lightweight)
+# Env-loading (lightweight — no external dotenv dependency)
 # ---------------------------------------------------------------------------
 
 
 def _load_dotenv(path: Optional[Path] = None) -> None:
-    """Minimal .env loader — no external dependency needed."""
+    """Minimal .env loader."""
     target = path or Path.cwd() / ".env"
     if not target.exists():
         return
@@ -45,6 +45,10 @@ def _load_dotenv(path: Optional[Path] = None) -> None:
 
 
 _load_dotenv()
+# Also try ~/.ecoseek/.env
+_ecoseek_env = Path.home() / ".ecoseek" / ".env"
+if _ecoseek_env.exists():
+    _load_dotenv(_ecoseek_env)
 
 
 # ---------------------------------------------------------------------------
@@ -58,6 +62,11 @@ def agenticplug_token() -> Optional[str]:
     Checks AGENTICPLUG_SESSION first, then CONNECTOR_TOKEN.
     """
     return os.getenv("AGENTICPLUG_SESSION") or os.getenv("CONNECTOR_TOKEN")
+
+
+def has_agenticplug_auth() -> bool:
+    """True if we have at least one auth mechanism configured."""
+    return agenticplug_token() is not None
 
 
 # ---------------------------------------------------------------------------
