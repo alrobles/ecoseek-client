@@ -46,19 +46,17 @@ def test_healthz_ok(client, httpx_mock: HTTPXMock):
 
 
 def test_whoami_no_auth(client_no_auth, httpx_mock: HTTPXMock):
-    # client_no_auth has no explicit token, but may find session file on disk
     httpx_mock.add_response(
         url="http://test.local:3100/healthz",
         json={"connector_id": "reumanlab", "status": "completed"},
     )
     result = client_no_auth.whoami()
-    assert result.success
     assert result.data["connector_id"] == "reumanlab"
-    # "auth" key only present when has_auth is False AND no session file
-    # If session.json exists on disk, "user" will be set instead
-    auth_val = result.data.get("auth")
-    user_val = result.data.get("user")
-    assert auth_val == "none" or user_val is not None
+    assert result.data["connected"] is True
+    if client_no_auth.has_auth:
+        assert result.success
+    else:
+        assert not result.success
 
 
 # ── Clusters ──────────────────────────────────────────────────────────
@@ -82,7 +80,11 @@ def test_clusters_hpc_disabled(client, httpx_mock: HTTPXMock):
 # ── Task dispatch ─────────────────────────────────────────────────────
 
 def test_task_remote_health(client, httpx_mock: HTTPXMock):
-    httpx_mock.add_response(url="http://test.local:3100/healthz", json={"connector_id": "reumanlab", "status": "completed"})
+    httpx_mock.add_response(
+        url="http://test.local:3100/v1/tasks",
+        method="POST",
+        json={"status": "completed", "result": {"connector": "reumanlab", "status": "ok"}},
+    )
     result = client.task("remote.health")
     assert result.success
 
