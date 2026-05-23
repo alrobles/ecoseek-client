@@ -5,27 +5,50 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "ecoseek-client"
 version = "0.1.0"
-description = "EcoSeek first-class local client — CLI, providers, AAR loop, and AgenticPlug integration"
+description = "EcoSeek first-class local client — CLI, providers, AAR loop, AgenticPlug integration, and HPC workflows for ecology"
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.10"
-authors = [{name = "EcoSeek contributors"}]
-keywords = ["ecoseek", "agenticplug", "hpc", "sdm", "ecology"]
+authors = [
+    {name = "EcoSeek contributors", email = "reumanlab@ku.edu"},
+]
+keywords = [
+    "ecoseek",
+    "agenticplug",
+    "hpc",
+    "sdm",
+    "ecology",
+    "species-distribution-modeling",
+    "scientific-agent",
+    "slurm",
+    "climate",
+    "niche-modeling",
+]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Scientific/Engineering :: GIS",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Operating System :: POSIX :: Linux",
+    "Environment :: Console",
 ]
-
 dependencies = [
     "click>=8.0",
     "httpx>=0.24",
     "python-dotenv>=1.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/alrobles/ecoseek-client"
+Repository = "https://github.com/alrobles/ecoseek-client"
+Issues = "https://github.com/alrobles/ecoseek-client/issues"
+Changelog = "https://github.com/alrobles/ecoseek-client/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 dev = [
@@ -39,7 +62,20 @@ ecoseek = "ecoseek_client.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+include = ["ecoseek_client*"]
+
+[tool.setuptools.package-data]
+ecoseek_client = [
+    "skills/definitions/*.md",
+    "prompts/*.txt",
+    "prompts/*.md",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+python_files = ["test_*.py"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
