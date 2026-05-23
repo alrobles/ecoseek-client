@@ -9,7 +9,12 @@ from typing import Optional
 import click
 
 from . import __version__
-from .providers import AgenticPlugClient, KNOWN_TASKS
+from .providers import (
+    AgenticPlugClient,
+    HermesProvider,
+    HermesOrchestrationResult,
+    KNOWN_TASKS,
+)
 
 
 def _sanitize(data: dict) -> dict:
@@ -32,6 +37,10 @@ def _print_result(result, token_safe: bool = True):
 
 def _get_client() -> AgenticPlugClient:
     return AgenticPlugClient()
+
+
+def _get_hermes() -> HermesProvider:
+    return HermesProvider()
 
 
 # ── Root CLI ──────────────────────────────────────────────────────────
@@ -94,6 +103,17 @@ def doctor():
     else:
         click.echo(f"  session file: {session_path} (not found)")
 
+    click.secho("Hermes", fg="green", bold=True)
+    try:
+        hermes = _get_hermes()
+        hermes_info = hermes.whoami()
+        if hermes_info.get("healthy"):
+            click.echo(f"  provider: hermes (connected)")
+        else:
+            click.secho(f"  provider: hermes (unreachable)", fg="yellow")
+    except Exception as e:
+        click.secho(f"  provider: hermes (error — {e})", fg="yellow")
+
     click.secho("HPC", fg="green", bold=True)
     if client.has_auth:
         hpc_result = client.task("hpc.status")
@@ -101,7 +121,7 @@ def doctor():
             jobs = hpc_result.data.get("jobs", [])
             click.echo(f"  squeue: {len(jobs) if isinstance(jobs, list) else '?'} jobs")
         else:
-            click.secho(f"  squeue: failed — {hpc_result.error}", fg="yellow")
+            click.secho(f"  squeue: skipped ({hpc_result.error})", fg="yellow")
     else:
         click.secho("  squeue: skipped (no auth)", fg="yellow")
 
@@ -119,11 +139,7 @@ def agenticplug():
 
 @agenticplug.command()
 def whoami():
-    """Show connected user and connector identity.
-
-    Reads session from AGENTICPLUG_SESSION env var or
-    ~/.config/agenticplug/session.json. Never prints tokens.
-    """
+    """Show connected user and connector identity."""
     client = _get_client()
 
     if not client.has_auth:
@@ -155,7 +171,7 @@ def health():
 
 @agenticplug.command()
 def status():
-    """Full status: health, capabilities, and HPC queue (if auth)."""
+    """Full status: health, capabilities, and HPC queue."""
     client = _get_client()
     result = client.status()
 
@@ -252,6 +268,281 @@ def task_run(task_name: str):
 
     click.echo()
     _print_result(result)
+
+
+# ── hermes group ──────────────────────────────────────────────────────
+
+@main.group()
+def hermes():
+    """Hermes scientific agent provider (via AgenticPlug)."""
+    pass
+
+
+@hermes.command()
+def whoami():
+    """Check Hermes identity and connectivity."""
+    provider = _get_hermes()
+    info = provider.whoami()
+
+    click.secho("Hermes Provider", fg="cyan", bold=True)
+    click.echo(f"  connector: {info['connector']}")
+
+    if info["healthy"]:
+        click.secho(f"  status: connected ({info['elapsed_ms']:.0f}ms)", fg="green")
+    else:
+        click.secho(f"  status: unreachable ({info['elapsed_ms']:.0f}ms)", fg="red")
+
+    detail = info.get("detail", {})
+    if detail:
+        click.echo()
+        click.echo(json.dumps(detail, indent=2, default=str))
+
+
+@hermes.command()
+@click.argument("task_text", required=False)
+@click.option("--mode", default="ecoSeek", help="Task mode: ecoSeek (orchestrated) or diy (direct)")
+@click.option("--species", "-s", help="Target species")
+@click.option("--region", "-r", help="Geographic region")
+@click.option("--method", "-m", help="Analysis method")
+def orchestrate(task_text: Optional[str], mode: str, species: Optional[str], region: Optional[str], method: Optional[str]):
+    """Send a task to Hermes for orchestration.
+
+    \b
+    Examples:
+      ecoseek hermes orchestrate "Run SDM for monarch butterfly in Mexico"
+      ecoseek hermes orchestrate --species "Panthera onca" --region Yucatan --method MaxEnt
+    """
+    provider = _get_hermes()
+
+    if task_text:
+        task = task_text
+    else:
+        if not species:
+            click.secho("Provide a task or --species.", fg="red", err=True)
+            sys.exit(1)
+        task = None  # will use science_task()
+
+    click.secho("Hermes Orchestration", fg="cyan", bold=True)
+
+    if task:
+        click.echo(f"  task: {task}")
+        click.echo(f"  mode: {mode}")
+        click.echo()
+        result = provider.orchestrate(task, mode=mode)
+    elif species:
+        click.echo(f"  species: {species}  region: {region}  method: {method}")
+        click.echo()
+        result = provider.science_task(
+            goal="SDM" if not method else method,
+            species=species,
+            region=region,
+            method=method,
+        )
+    else:
+        click.secho("Provide a task or --species.", fg="red", err=True)
+        sys.exit(1)
+
+    if result.status == "completed":
+        click.secho(f"Completed ({result.elapsed_ms:.0f}ms)", fg="green", bold=True)
+        click.echo(f"  task_id: {result.task_id}")
+        if result.plan:
+            click.secho("  Plan:", fg="yellow")
+            click.echo(f"    {json.dumps(result.plan, indent=4, default=str)}")
+        if result.workers:
+            click.secho(f"  Workers: {len(result.workers)} deployed", fg="yellow")
+            for w in result.workers:
+                status_icon = "✓" if w.get("status") == "success" else "✗"
+                click.echo(f"    {status_icon} {w.get('name', '?')}: {w.get('status', '?')}")
+        if result.report:
+            click.secho("  Report:", fg="yellow")
+            click.echo(f"    {result.report}")
+    elif result.status == "failed":
+        click.secho(f"Failed: {result.error}", fg="red", bold=True)
+        sys.exit(1)
+    elif result.status == "timeout":
+        click.secho(f"Timeout after {provider.timeout}s: {result.task_id}", fg="red", bold=True)
+        sys.exit(1)
+    else:
+        click.secho(f"Status: {result.status} (task_id: {result.task_id})", fg="yellow")
+
+
+@hermes.command()
+@click.argument("message")
+def chat(message: str):
+    """Send a message to Hermes chat.
+
+    Example:
+      ecoseek hermes chat "What ecological tools are available?"
+    """
+    provider = _get_hermes()
+    response = provider.chat([
+        {"role": "user", "content": message}
+    ])
+
+    click.secho("Hermes:", fg="cyan", bold=True)
+    click.echo(response.message.content)
+    if response.tool_calls:
+        click.echo()
+        click.secho("Tool calls:", fg="yellow")
+        for tc in response.tool_calls:
+            click.echo(f"  {tc.name}({json.dumps(tc.arguments)})")
+
+
+# ── smoke group ───────────────────────────────────────────────────────
+
+@main.group()
+def smoke():
+    """Diagnostic smoke tests."""
+    pass
+
+
+@smoke.command()
+def remote():
+    """Run full remote smoke workflow.
+
+    Checks connector health, clusters, remote dispatch, and HPC.
+    Classifies failures clearly: auth, broker, connector, HPC, capability.
+    Never prints bearer tokens.
+    """
+    from .workflows import run_remote_smoke
+
+    client = _get_client()
+    result = run_remote_smoke(client, verbose=True)
+
+    if not result.all_healthy:
+        click.echo()
+        click.secho(
+            f"Remote smoke: {result.errors} error(s), {result.warnings} warning(s).",
+            fg="red",
+            bold=True,
+        )
+        sys.exit(1)
+    else:
+        click.echo()
+        click.secho("Remote smoke: all clear.", fg="green", bold=True)
+
+
+# ── aar group ─────────────────────────────────────────────────────────
+
+@main.group()
+def aar():
+    """AAR (After Action Review) ReAct loop."""
+    pass
+
+
+@aar.command()
+@click.argument("goal")
+@click.option("--cycles", "-c", type=int, default=3, help="Max cycles (default: 3, max: 5)")
+def run(goal: str, cycles: int):
+    """Run the AAR loop for a goal.
+
+    observe → reason → act → evaluate → update
+
+    \b
+    Example:
+      ecoseek aar run "Check HPC cluster status and connector health"
+    """
+    from .aar import AARLoop
+
+    provider = _get_hermes()
+    loop = AARLoop(provider)
+    loop.max_cycles = min(cycles, 5)
+
+    click.secho(f"AAR: {goal}", fg="cyan", bold=True)
+    click.echo(f"  max cycles: {loop.max_cycles}")
+    click.echo()
+
+    result = loop.run(goal)
+
+    for cycle in result.cycles:
+        icon = "✓" if cycle.result.success else "✗"
+        click.secho(f"[{cycle.cycle_id}] {icon} {cycle.action.tool}", fg="green" if cycle.result.success else "red")
+        click.echo(f"     reason: {cycle.reasoning[:120]}...")
+        click.echo(f"     result: {cycle.result.data}")
+        click.echo()
+
+    if result.success:
+        click.secho(f"AAR complete: {result.summary[:200]}", fg="green", bold=True)
+    else:
+        click.secho(f"AAR incomplete after {len(result.cycles)} cycles", fg="yellow", bold=True)
+
+    click.echo(f"  total: {result.total_elapsed_ms:.0f}ms")
+
+
+@aar.command()
+def status():
+    """Show AAR loop capabilities."""
+    click.secho("AAR Loop (Observe → Reason → Act → Evaluate → Update)", fg="cyan", bold=True)
+    click.echo()
+    click.echo("  Powered by: Hermes (reasoning) + AgenticPlug (actions)")
+    click.echo("  Max cycles: 5 (configurable)")
+    click.echo()
+    click.echo("  Available actions:")
+    click.echo("    agenticplug.task  — Run named connector tasks")
+    click.echo("    hermes.orchestrate — Full agent orchestration")
+    click.echo("    hermes.chat       — Direct chat completion")
+    click.echo()
+    click.echo("  Observation sources:")
+    click.echo("    agenticplug       — Connector health, clusters, HPC")
+    click.echo("    hpc               — Slurm queue and job status")
+    click.echo("    filesystem        — Local file operations")
+
+
+# ── skill group ───────────────────────────────────────────────────────
+
+@main.group()
+def skill():
+    """Scientific skills for ecology workflows."""
+    pass
+
+
+@skill.command(name="list")
+def skill_list():
+    """List available scientific skills."""
+    from .skills import SkillLoader
+
+    loader = SkillLoader()
+    skills = loader.list_all()
+
+    if not skills:
+        click.secho("No skills loaded.", fg="yellow")
+        return
+
+    categories: dict = {}
+    for s in skills:
+        categories.setdefault(s.category, []).append(s)
+
+    for cat, cat_skills in sorted(categories.items()):
+        click.secho(f"{cat}", fg="cyan", bold=True)
+        for s in cat_skills:
+            click.echo(f"  {s.name:25s} {s.description}")
+        click.echo()
+
+    click.echo(f"  Total: {len(skills)} skills in {len(categories)} categories")
+
+
+@skill.command(name="show")
+@click.argument("name")
+def skill_show(name: str):
+    """Show a skill's full content."""
+    from .skills import SkillLoader
+
+    loader = SkillLoader()
+    skill = loader.get(name)
+
+    if not skill:
+        click.secho(f"Skill not found: {name}", fg="red", err=True)
+        available = [s.name for s in loader.list_all()]
+        if available:
+            click.echo(f"Available: {', '.join(available)}")
+        sys.exit(1)
+
+    click.secho(f"Skill: {skill.name}", fg="cyan", bold=True)
+    click.echo(f"  category: {skill.category}")
+    if skill.triggers:
+        click.echo(f"  triggers: {', '.join(skill.triggers)}")
+    click.echo()
+    click.echo(skill.body)
 
 
 if __name__ == "__main__":
