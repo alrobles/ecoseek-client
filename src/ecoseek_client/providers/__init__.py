@@ -1,5 +1,19 @@
 """Providers package."""
 
-from .agenticplug import AgenticPlugClient, AgenticPlugResult, KNOWN_TASKS
+from .agenticplug import (
+    KNOWN_TASKS,
+    AgenticPlugAuthError,
+    AgenticPlugClient,
+    AgenticPlugError,
+    AgenticPlugResult,
+    resolve_connector,
+)
 
-__all__ = ["AgenticPlugClient", "AgenticPlugResult", "KNOWN_TASKS"]
+__all__ = [
+    "KNOWN_TASKS",
+    "AgenticPlugAuthError",
+    "AgenticPlugClient",
+    "AgenticPlugError",
+    "AgenticPlugResult",
+    "resolve_connector",
+]

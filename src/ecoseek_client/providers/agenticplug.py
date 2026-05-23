@@ -49,43 +49,45 @@ class AgenticPlugAuthError(AgenticPlugError):
 
 
 @dataclass
-class ConnectorInfo:
-    """Discovered connector/endpoint info (for list_connectors / cluster listing)."""
+class AgenticPlugResult:
+    """Result from an AgenticPlug API call (CLI-compatible)."""
 
-    connector_id: str
-    connector_type: str = "connector"
-    version: str = "unknown"
-    health: str = "unknown"  # "online", "degraded", "stale", "unknown"
-    tools: List[Dict[str, Any]] = field(default_factory=list)
-    capabilities: Dict[str, Any] = field(default_factory=dict)
-
-    @property
-    def is_online(self) -> bool:
-        return self.health == "online"
+    success: bool
+    data: Dict[str, Any] = field(default_factory=dict)
+    status_code: int = 0
+    error: str = ""
+    elapsed_ms: float = 0.0
+    endpoint: str = ""
 
 
-@dataclass
-class TaskResult:
-    """Result of a dispatched task."""
+# ── Task registry ──────────────────────────────────────────────────────
 
-    status: str  # "accepted", "running", "completed", "failed", "error"
-    task_id: str = ""
-    output: Optional[str] = None
-    error: Optional[str] = None
-    raw: Dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass
-class WhoAmI:
-    """Session identity (used by CLI whoami)."""
-
-    login: Optional[str] = None
-    name: Optional[str] = None
-    scopes: List[str] = field(default_factory=list)
-    default_cluster: Optional[str] = None
-    session_expired: bool = False
-    connector_id: str = "unknown"
-    connected: bool = False
+KNOWN_TASKS: Dict[str, Dict[str, str]] = {
+    "remote.health": {
+        "endpoint": "/v1/tasks",
+        "method": "POST",
+        "capability": "remote.health",
+        "description": "Reumanlab connector health check",
+    },
+    "hpc.status": {
+        "endpoint": "/hpc/squeue",
+        "method": "GET",
+        "capability": "hpc.status",
+        "description": "Slurm queue status (read-only)",
+    },
+    "hpc.queue": {
+        "endpoint": "/hpc/squeue",
+        "method": "GET",
+        "capability": "hpc.queue",
+        "description": "Slurm queue status (read-only)",
+    },
+    "hpc.submit": {
+        "endpoint": "/hpc/submit",
+        "method": "POST",
+        "capability": "hpc.submit",
+        "description": "Submit allowlisted template job",
+    },
+}
 
 
 # ── Client ─────────────────────────────────────────────────────────────
@@ -141,254 +143,188 @@ class AgenticPlugClient:
             headers["Authorization"] = f"Bearer {token}"
         return headers
 
-    def _get(self, path: str, auth: bool = False) -> httpx.Response:
+    def _request(
+        self,
+        method: str,
+        path: str,
+        auth: bool = False,
+        json_body: Optional[Dict] = None,
+    ) -> AgenticPlugResult:
         url = f"{self.base_url}{path}"
         headers: Dict[str, str] = {"Accept": "application/json"}
         if auth:
             headers.update(self._auth_headers())
-        return httpx.get(
-            url, headers=headers, timeout=self.timeout, verify=self.verify_ssl
-        )
+        if json_body is not None:
+            headers["Content-Type"] = "application/json"
 
-    def _post(self, path: str, body: Dict[str, Any], auth: bool = True) -> httpx.Response:
-        url = f"{self.base_url}{path}"
-        headers: Dict[str, str] = {
-            "Accept": "application/json",
-            "Content-Type": "application/json",
-        }
-        if auth:
-            headers.update(self._auth_headers())
-        return httpx.post(
-            url, json=body, headers=headers, timeout=self.timeout, verify=self.verify_ssl
-        )
+        t0 = time.monotonic()
+        try:
+            with httpx.Client(timeout=self.timeout, verify=self.verify_ssl) as client:
+                if method == "GET":
+                    resp = client.get(url, headers=headers)
+                elif method == "POST":
+                    resp = client.post(url, headers=headers, json=json_body)
+                else:
+                    return AgenticPlugResult(
+                        success=False, error=f"Unsupported method: {method}", endpoint=path
+                    )
+
+            elapsed = (time.monotonic() - t0) * 1000
+            try:
+                data = resp.json() if resp.content else {}
+            except (json.JSONDecodeError, ValueError):
+                data = {"raw": resp.text[:1000]}
+
+            return AgenticPlugResult(
+                success=resp.is_success,
+                data=data if isinstance(data, dict) else {"value": data},
+                status_code=resp.status_code,
+                elapsed_ms=round(elapsed, 1),
+                endpoint=path,
+            )
+        except httpx.ConnectError as exc:
+            return AgenticPlugResult(
+                success=False, error=f"Connection refused at {url}: {exc}", endpoint=path
+            )
+        except httpx.TimeoutException:
+            return AgenticPlugResult(
+                success=False,
+                error=f"Request timed out after {self.timeout}s: {url}",
+                endpoint=path,
+            )
+        except Exception as exc:
+            return AgenticPlugResult(
+                success=False, error=f"Request failed: {exc}", endpoint=path
+            )
 
     # ── Public API ────────────────────────────────────────────────────
 
-    def health(self) -> Dict[str, Any]:
-        """GET /health — liveness check (no auth). Returns dict with 'status' key."""
-        try:
-            resp = self._get("/health")
-            return resp.json() if resp.content else {"status": "error"}
-        except httpx.ConnectError:
-            return {"status": "unreachable", "error": "Connection refused"}
-        except Exception as exc:
-            return {"status": "error", "error": str(exc)}
+    def health(self) -> AgenticPlugResult:
+        """GET /health — liveness check (no auth)."""
+        return self._request("GET", "/health")
 
-    def healthz(self) -> Dict[str, Any]:
+    def healthz(self) -> AgenticPlugResult:
         """GET /healthz — reumanlab connector detail (no auth)."""
-        try:
-            resp = self._get("/healthz")
-            return resp.json()
-        except Exception as exc:
-            return {"status": "error", "error": str(exc)}
+        return self._request("GET", "/healthz")
 
-    def capabilities(self) -> Dict[str, Any]:
+    def capabilities(self) -> AgenticPlugResult:
         """GET /capabilities — full endpoint listing (no auth)."""
-        try:
-            resp = self._get("/capabilities")
-            return resp.json()
-        except Exception:
-            return {}
+        return self._request("GET", "/capabilities")
 
-    def whoami(self) -> WhoAmI:
-        """Identify the current user/session.
-
-        Returns a WhoAmI object for CLI consumption.
-        """
-        # Try healthz for connector detail
-        try:
-            hz = self.healthz()
-        except Exception:
-            hz = {}
-
-        connector_id = hz.get("connector_id", "unknown")
-        connected = hz.get("status") == "ok" or bool(hz.get("connector_id"))
-
+    def whoami(self) -> AgenticPlugResult:
+        """Identify the current user/session."""
+        hz_result = self.healthz()
         sess = self.session
+
+        identity: Dict[str, Any] = {}
         if sess:
-            return WhoAmI(
-                login=sess.login,
-                name=sess.name,
-                scopes=sess.scopes if isinstance(sess.scopes, list) else [],
-                default_cluster=sess.default_cluster,
-                session_expired=sess.session_expired,
-                connector_id=connector_id,
-                connected=connected,
-            )
-        elif self.has_auth:
-            return WhoAmI(
-                login="authenticated",
-                name=None,
-                scopes=[],
-                default_cluster=None,
-                session_expired=False,
-                connector_id=connector_id,
-                connected=connected,
-            )
+            identity["user"] = sess.login or sess.identity
+            identity["name"] = sess.name
+            identity["scopes"] = sess.scopes if isinstance(sess.scopes, list) else []
+            identity["default_cluster"] = sess.default_cluster
+            identity["session_expired"] = sess.session_expired
+
+        if hz_result.success:
+            identity["connector_id"] = hz_result.data.get("connector_id", "unknown")
+            identity["connected"] = True
         else:
-            return WhoAmI(
-                login=None,
-                name=None,
-                scopes=[],
-                default_cluster=None,
-                session_expired=False,
-                connector_id=connector_id,
-                connected=connected,
-            )
+            identity["connector_id"] = "unknown"
+            identity["connected"] = False
 
-    def list_connectors(self) -> List[ConnectorInfo]:
-        """List discovered connectors from /healthz and /capabilities.
+        return AgenticPlugResult(
+            success=bool(sess or self.has_auth),
+            data=identity,
+            elapsed_ms=hz_result.elapsed_ms,
+            endpoint="/healthz",
+        )
 
-        Returns a list of ConnectorInfo objects for CLI clusters command.
-        """
-        connectors: List[ConnectorInfo] = []
+    def clusters(self) -> AgenticPlugResult:
+        """List available clusters/connectors."""
+        hz_result = self.healthz()
+        cap_result = self.capabilities()
 
-        # From /healthz — the reumanlab connector itself
-        try:
-            hz = self.healthz()
-        except Exception:
-            hz = {}
+        clusters: List[Dict[str, Any]] = []
 
-        if hz:
-            cid = hz.get("connector_id", "reumanlab")
+        if hz_result.success:
+            cid = hz_result.data.get("connector_id", "reumanlab")
+            result_data = hz_result.data.get("result", {})
             version = "unknown"
-            result = hz.get("result", {})
-            if isinstance(result, dict):
-                version = str(result.get("version", "unknown"))
+            if isinstance(result_data, dict):
+                version = str(result_data.get("version", "unknown"))
+            clusters.append({
+                "id": cid,
+                "name": cid,
+                "type": "connector",
+                "healthy": hz_result.success,
+                "version": version,
+            })
 
-            # Build tools list from capabilities
-            try:
-                caps = self.capabilities()
-            except Exception:
-                caps = {}
+        if cap_result.success:
+            hpc = cap_result.data.get("hpc", {})
+            if hpc.get("enabled"):
+                clusters.append({
+                    "id": "ku-hpc",
+                    "name": "KU-HPC",
+                    "type": "hpc",
+                    "healthy": hz_result.success,
+                    "submit_enabled": hpc.get("submit_enabled", False),
+                })
 
-            endpoints = caps.get("endpoints", {})
-            tools = [
-                {"name": ep, "description": info.get("description", "")}
-                for ep, info in endpoints.items()
-            ]
+        return AgenticPlugResult(
+            success=True,
+            data={"clusters": clusters, "count": len(clusters)},
+        )
 
-            health_status = "online" if hz.get("status") == "ok" else "degraded"
+    def status(self) -> AgenticPlugResult:
+        """Full status: health + capabilities + HPC (if auth)."""
+        h_result = self.health()
+        hz_result = self.healthz()
+        cap_result = self.capabilities()
 
-            connectors.append(
-                ConnectorInfo(
-                    connector_id=cid,
-                    connector_type="connector",
-                    version=version,
-                    health=health_status,
-                    tools=tools,
-                    capabilities=caps,
-                )
+        status_data: Dict[str, Any] = {
+            "connector": {
+                "healthy": h_result.success,
+                "url": self.base_url,
+                "latency_ms": h_result.elapsed_ms,
+            },
+            "connector_detail": hz_result.data if hz_result.success else {},
+            "capabilities": cap_result.data if cap_result.success else {},
+            "auth": "token_configured" if self.has_auth else "none",
+        }
+
+        if self.has_auth:
+            hpc_result = self._request("GET", "/hpc/squeue", auth=True)
+            if hpc_result.success:
+                status_data["hpc"] = hpc_result.data
+
+        overall_healthy = h_result.success and hz_result.success
+        return AgenticPlugResult(success=overall_healthy, data=status_data)
+
+    def task(self, task_name: str) -> AgenticPlugResult:
+        """Run a named task through the connector."""
+        task_def = KNOWN_TASKS.get(task_name)
+        if task_def is None:
+            return AgenticPlugResult(
+                success=False,
+                error=f"Unknown task: {task_name}. Known: {', '.join(sorted(KNOWN_TASKS))}",
             )
 
-        # Also add HPC if enabled
-        try:
-            caps = self.capabilities()
-        except Exception:
-            caps = {}
-        hpc_info = caps.get("hpc", {})
-        if hpc_info.get("enabled"):
-            connectors.append(
-                ConnectorInfo(
-                    connector_id="ku-hpc",
-                    connector_type="hpc",
-                    version="n/a",
-                    health="online" if connectors and connectors[0].is_online else "unknown",
-                    tools=[{"name": "hpc.status", "description": "Slurm queue status"},
-                           {"name": "hpc.queue", "description": "Slurm queue"},
-                           {"name": "hpc.submit", "description": "Submit allowlisted job"}],
-                    capabilities={"hpc": hpc_info},
-                )
-            )
+        # For hpc tasks that go directly to /hpc/squeue
+        if task_def["endpoint"].startswith("/hpc/"):
+            return self._request(task_def["method"], task_def["endpoint"], auth=True)
 
-        return connectors
-
-    def get_connector(self, connector_id: str) -> ConnectorInfo:
-        """Get a specific connector by ID. Raises AgenticPlugError if not found."""
-        connectors = self.list_connectors()
-        for c in connectors:
-            if c.connector_id == connector_id:
-                return c
-        raise AgenticPlugError(f"Connector '{connector_id}' not found")
+        # For capability dispatch via POST /v1/tasks
+        body = {"capability": task_def.get("capability", task_name)}
+        return self._request(task_def["method"], task_def["endpoint"], auth=True, json_body=body)
 
     def send_task(
         self,
         task_name: str,
         connector_id: Optional[str] = None,
         payload: Optional[Dict[str, Any]] = None,
-    ) -> TaskResult:
-        """Dispatch a task via POST /v1/tasks or a known shortcut.
-
-        Maps known task names to the appropriate endpoint:
-        - remote.health → POST /v1/tasks {capability: "remote.health"}
-        - hpc.status   → GET /hpc/squeue (falls back to POST /v1/tasks)
-        - hpc.queue    → GET /hpc/squeue (falls back to POST /v1/tasks)
-
-        If the task name doesn't match a known shortcut, it's sent directly
-        as a capability dispatch.
-        """
-        if not self.has_auth:
-            raise AgenticPlugAuthError(
-                "Not authenticated. Set AGENTICPLUG_SESSION or CONNECTOR_TOKEN."
-            )
-
-        # Known shortcuts
-        if task_name in ("hpc.status", "hpc.queue"):
-            try:
-                resp = self._get("/hpc/squeue", auth=True)
-                data = resp.json()
-                if resp.is_success:
-                    return TaskResult(
-                        status="completed",
-                        task_id="",
-                        output=json.dumps(data.get("jobs", [])),
-                        raw=data,
-                    )
-                else:
-                    return TaskResult(
-                        status="error",
-                        error=data.get("detail") or data.get("error") or f"HTTP {resp.status_code}",
-                        raw=data,
-                    )
-            except httpx.HTTPStatusError as exc:
-                if exc.response.status_code == 401:
-                    raise AgenticPlugAuthError("Invalid or expired token") from exc
-                return TaskResult(
-                    status="error",
-                    error=f"HTTP {exc.response.status_code}: {exc.response.text[:200]}",
-                )
-            except httpx.ConnectError as exc:
-                raise AgenticPlugError(f"Cannot reach connector at {self.base_url}") from exc
-
-        # Default: capability dispatch via POST /v1/tasks
-        capability = task_name
-        body: Dict[str, Any] = {"capability": capability}
-        if payload:
-            body.update(payload)
-
-        try:
-            resp = self._post("/v1/tasks", body, auth=True)
-            data = resp.json()
-            status = "completed" if resp.is_success else "error"
-            task_id = data.get("task_id", "")
-            return TaskResult(
-                status=status,
-                task_id=task_id,
-                output=data.get("output") or json.dumps(data),
-                error=data.get("error") or data.get("detail"),
-                raw=data,
-            )
-        except httpx.HTTPStatusError as exc:
-            if exc.response.status_code == 401:
-                raise AgenticPlugAuthError("Invalid or expired token") from exc
-            if exc.response.status_code == 429:
-                raise AgenticPlugError("Rate limited. Wait and retry.") from exc
-            return TaskResult(
-                status="error",
-                error=f"HTTP {exc.response.status_code}: {exc.response.text[:200]}",
-            )
-        except httpx.ConnectError as exc:
-            raise AgenticPlugError(f"Cannot reach connector at {self.base_url}") from exc
+    ) -> AgenticPlugResult:
+        """Alias for task() with explicit connector_id (unused for local dispatch)."""
+        return self.task(task_name)
 
 
 # ── Helpers ────────────────────────────────────────────────────────────
@@ -399,7 +335,7 @@ def resolve_connector(client: Optional[AgenticPlugClient] = None) -> str:
 
     Priority:
     1. ECOSEEK_REMOTE_CONNECTOR env var
-    2. First online connector from /healthz
+    2. First healthy connector from /healthz
     3. Default: "reumanlab"
     """
     if ECOSEEK_REMOTE_CONNECTOR:
@@ -409,10 +345,11 @@ def resolve_connector(client: Optional[AgenticPlugClient] = None) -> str:
         client = AgenticPlugClient()
 
     try:
-        connectors = client.list_connectors()
-        for c in connectors:
-            if c.is_online:
-                return c.connector_id
+        clusters_result = client.clusters()
+        if clusters_result.success:
+            for c in clusters_result.data.get("clusters", []):
+                if c.get("healthy"):
+                    return c["id"]
     except Exception:
         pass
 
