@@ -4,8 +4,19 @@ Reads the session JSON produced by ``agenticplug login`` (GitHub Device Flow).
 The session lives at ``~/.config/agenticplug/session.json`` and is owned/rotated
 by the AgenticPlug CLI. ecoseek-client only consumes it as a client.
 
-This module is intentionally dependency-free. It does not perform auth, refresh
-tokens, or talk to the gateway — higher layers do that.
+Session format (v2):
+{
+  "version": 2,
+  "provider": "github",
+  "user": {"login": "...", "name": "...", ...},
+  "session": {
+    "id": "<bearer-token>",
+    "token_type": "Bearer",
+    "expires_at": <unix-ms-timestamp>
+  },
+  "broker_url": "https://...",
+  ...
+}
 """
 
 from __future__ import annotations
@@ -36,7 +47,8 @@ class Session:
     base_url: Optional[str] = None
     token: Optional[str] = None
     token_type: str = "Bearer"
-    expires_at: Optional[str] = None
+    expires_at: Optional[str] = None  # ISO string for display
+    expires_at_ms: Optional[int] = None  # raw Unix ms
     user: Dict[str, Any] = field(default_factory=dict)
     scopes: List[str] = field(default_factory=list)
     route_header: Optional[str] = None
@@ -51,27 +63,78 @@ class Session:
             return None
         return self.user.get("login") or self.user.get("name") or self.user.get("id")
 
+    @property
+    def login(self) -> Optional[str]:
+        """GitHub login from session (used by CLI whoami)."""
+        if not isinstance(self.user, dict):
+            return None
+        return self.user.get("login")
+
+    @property
+    def name(self) -> Optional[str]:
+        """Display name from session."""
+        if not isinstance(self.user, dict):
+            return None
+        return self.user.get("name") or self.user.get("login")
+
+    @property
+    def session_expired(self) -> bool:
+        """True if the session is expired."""
+        return self.is_expired()
+
     def is_expired(self, now: Optional[datetime] = None) -> bool:
-        """True if ``expires_at`` is set and in the past."""
-        if not self.expires_at:
-            return False
-        try:
-            ts = self.expires_at
-            if ts.endswith("Z"):
-                ts = ts[:-1] + "+00:00"
-            exp = datetime.fromisoformat(ts)
-        except ValueError:
-            return False
-        if exp.tzinfo is None:
-            exp = exp.replace(tzinfo=timezone.utc)
+        """True if ``expires_at_ms`` is set and in the past."""
+        if self.expires_at_ms is None:
+            # Try parsing ISO string fallback
+            if not self.expires_at:
+                return False
+            try:
+                ts = self.expires_at
+                if ts.endswith("Z"):
+                    ts = ts[:-1] + "+00:00"
+                exp = datetime.fromisoformat(ts)
+            except ValueError:
+                return False
+            if exp.tzinfo is None:
+                exp = exp.replace(tzinfo=timezone.utc)
+            current = now or datetime.now(timezone.utc)
+            return exp <= current
+
+        # Unix ms timestamp
+        exp_dt = datetime.fromtimestamp(self.expires_at_ms / 1000.0, tz=timezone.utc)
         current = now or datetime.now(timezone.utc)
-        return exp <= current
+        return exp_dt <= current
 
     def authorization_header(self) -> Optional[str]:
         """Build the Authorization header value."""
         if not self.token:
             return None
         return f"{self.token_type or 'Bearer'} {self.token}"
+
+
+# Alias for the agenticplug provider
+AgenticPlugSession = Session
+
+
+def _parse_expires_at(expires_raw: Any) -> tuple[Optional[str], Optional[int]]:
+    """Parse expires_at from either ISO string or Unix ms timestamp.
+
+    Returns (iso_string, unix_ms).
+    """
+    if expires_raw is None:
+        return None, None
+
+    if isinstance(expires_raw, (int, float)):
+        # Unix timestamp in milliseconds
+        ms = int(expires_raw)
+        try:
+            dt = datetime.fromtimestamp(ms / 1000.0, tz=timezone.utc)
+            return dt.isoformat(), ms
+        except (ValueError, OSError):
+            return str(ms), ms
+
+    # String — try as ISO
+    return str(expires_raw), None
 
 
 def load_session(path: Optional[Path] = None) -> Session:
@@ -98,6 +161,17 @@ def load_session(path: Optional[Path] = None) -> Session:
     if not isinstance(data, dict):
         raise SessionError(f"Session must be a JSON object. {LOGIN_HINT}")
 
+    # v2 session format: token is at session.id
+    session_data = data.get("session") or {}
+    if not isinstance(session_data, dict):
+        session_data = {}
+
+    token = session_data.get("id") or data.get("token")
+    token_type = session_data.get("token_type") or data.get("token_type") or "Bearer"
+
+    expires_raw = session_data.get("expires_at") or data.get("expires_at")
+    expires_at_iso, expires_at_ms = _parse_expires_at(expires_raw)
+
     scopes = data.get("scopes") or []
     if not isinstance(scopes, list):
         scopes = []
@@ -108,10 +182,11 @@ def load_session(path: Optional[Path] = None) -> Session:
 
     return Session(
         path=resolved,
-        base_url=data.get("base_url"),
-        token=data.get("token"),
-        token_type=data.get("token_type") or "Bearer",
-        expires_at=data.get("expires_at"),
+        base_url=data.get("broker_url") or data.get("base_url"),
+        token=token,
+        token_type=token_type,
+        expires_at=expires_at_iso,
+        expires_at_ms=expires_at_ms,
         user=user,
         scopes=scopes,
         route_header=data.get("route_header"),

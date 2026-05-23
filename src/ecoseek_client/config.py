@@ -11,11 +11,17 @@ from pathlib import Path
 from typing import Optional
 
 # ---------------------------------------------------------------------------
-# Defaults
+# Module-level constants (imported by providers)
 # ---------------------------------------------------------------------------
 
-DEFAULT_AGENTICPLUG_URL = "http://127.0.0.1:3100"
-DEFAULT_SESSION_RELATIVE = Path(".config") / "agenticplug" / "session.json"
+DEFAULT_AGENTICPLUG_URL: str = "http://127.0.0.1:3100"
+DEFAULT_SESSION_RELATIVE: Path = Path(".config") / "agenticplug" / "session.json"
+
+# Resolved once at import time
+AGENTICPLUG_URL: str = os.getenv("AGENTICPLUG_URL", DEFAULT_AGENTICPLUG_URL).rstrip("/")
+AGENTICPLUG_TIMEOUT: int = int(os.getenv("AGENTICPLUG_TIMEOUT", "30"))
+AGENTICPLUG_VERIFY_SSL: bool = os.getenv("AGENTICPLUG_VERIFY_SSL", "1").lower() not in ("0", "false", "no", "off")
+ECOSEEK_REMOTE_CONNECTOR: Optional[str] = os.getenv("ECOSEEK_REMOTE_CONNECTOR")
 
 # ---------------------------------------------------------------------------
 # Env-loading (no dotenv dependency — lightweight)
@@ -39,6 +45,19 @@ def _load_dotenv(path: Optional[Path] = None) -> None:
 
 
 _load_dotenv()
+
+
+# ---------------------------------------------------------------------------
+# Token resolution
+# ---------------------------------------------------------------------------
+
+
+def agenticplug_token() -> Optional[str]:
+    """Resolve the AgenticPlug bearer token from environment.
+
+    Checks AGENTICPLUG_SESSION first, then CONNECTOR_TOKEN.
+    """
+    return os.getenv("AGENTICPLUG_SESSION") or os.getenv("CONNECTOR_TOKEN")
 
 
 # ---------------------------------------------------------------------------
