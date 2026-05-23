@@ -1,261 +1,257 @@
-"""CLI entry point for ecoseek-client.
-
-Commands:
-
-    ecoseek doctor                 Environment diagnostics
-    ecoseek agenticplug whoami     Show session identity
-    ecoseek agenticplug clusters   List registered connectors
-    ecoseek agenticplug task NAME  Dispatch a task to the gateway
-    ecoseek smoke remote           Full remote smoke test
-"""
+"""ecoseek CLI — first-class local client for EcoSeek, AgenticPlug, and HPC."""
 
 from __future__ import annotations
 
+import json
 import sys
 from typing import Optional
 
 import click
 
-from ecoseek_client import __version__
+from . import __version__
+from .providers import AgenticPlugClient, KNOWN_TASKS
 
 
-# ---------------------------------------------------------------------------
-# Helper — safe token masking
-# ---------------------------------------------------------------------------
-
-def _safe_str(value: Optional[str], show_chars: int = 8) -> str:
-    """Return a token-safe representation: first N chars + '...'"""
-    if not value:
-        return "(not set)"
-    if len(value) <= show_chars:
-        return value
-    return value[:show_chars] + "..."
+def _sanitize(data: dict) -> dict:
+    """Remove sensitive fields from output."""
+    safe = dict(data)
+    for key in ("token", "access_token", "bearer"):
+        safe.pop(key, None)
+    return {k: _sanitize(v) if isinstance(v, dict) else v for k, v in safe.items()}
 
 
-# ---------------------------------------------------------------------------
-# Main group
-# ---------------------------------------------------------------------------
+def _print_result(result, token_safe: bool = True):
+    if not result.success:
+        click.secho(f"Error: {result.error}", fg="red", err=True)
+        return
+    data = result.data
+    if token_safe and isinstance(data, dict):
+        data = _sanitize(data)
+    click.echo(json.dumps(data, indent=2, default=str))
 
+
+def _get_client() -> AgenticPlugClient:
+    return AgenticPlugClient()
+
+
+# ── Root CLI ──────────────────────────────────────────────────────────
 
 @click.group()
 @click.version_option(version=__version__, prog_name="ecoseek")
-def main():
-    """EcoSeek first-class local client — CLI, providers, and HPC workflows."""
+@click.pass_context
+def main(ctx: click.Context):
+    """ecoseek — EcoSeek local client for AgenticPlug and HPC workflows."""
+    ctx.ensure_object(dict)
 
 
-# ---------------------------------------------------------------------------
-# doctor
-# ---------------------------------------------------------------------------
-
+# ── doctor ────────────────────────────────────────────────────────────
 
 @main.command()
 def doctor():
     """Run environment diagnostics."""
-    from ecoseek_client.doctor import run_doctor
+    import platform
+    import shutil
+    from pathlib import Path
 
-    sys.exit(run_doctor())
+    click.secho("ecoseek doctor", fg="cyan", bold=True)
+    click.echo(f"  version: {__version__}")
+    click.echo()
+
+    click.secho("Python", fg="green", bold=True)
+    click.echo(f"  {platform.python_version()} ({platform.python_implementation()})")
+    click.echo(f"  executable: {sys.executable}")
+    click.echo()
+
+    click.secho("Platform", fg="green", bold=True)
+    click.echo(f"  {platform.system()} {platform.release()}")
+    try:
+        with open("/proc/version") as f:
+            ver = f.read()
+        if "microsoft" in ver.lower() or "wsl" in ver.lower():
+            click.echo("  WSL2: yes")
+    except Exception:
+        pass
+    click.echo()
+
+    click.secho("Git", fg="green", bold=True)
+    git_path = shutil.which("git")
+    click.echo(f"  git: {git_path or 'NOT FOUND'}")
+
+    click.secho("AgenticPlug", fg="green", bold=True)
+    client = _get_client()
+    h_result = client.health()
+    if h_result.success:
+        click.echo(f"  connector: {client.base_url} (healthy, {h_result.elapsed_ms:.0f}ms)")
+    else:
+        click.secho(f"  connector: {client.base_url} (down)", fg="yellow")
+
+    auth_status = "configured" if client.has_auth else "not set"
+    click.echo(f"  auth: {auth_status}")
+
+    session_path = Path.home() / ".config" / "agenticplug" / "session.json"
+    if session_path.exists():
+        click.echo(f"  session file: {session_path} (found)")
+    else:
+        click.echo(f"  session file: {session_path} (not found)")
+
+    click.secho("HPC", fg="green", bold=True)
+    if client.has_auth:
+        hpc_result = client.task("hpc.status")
+        if hpc_result.success:
+            jobs = hpc_result.data.get("jobs", [])
+            click.echo(f"  squeue: {len(jobs) if isinstance(jobs, list) else '?'} jobs")
+        else:
+            click.secho(f"  squeue: failed — {hpc_result.error}", fg="yellow")
+    else:
+        click.secho("  squeue: skipped (no auth)", fg="yellow")
+
+    click.echo()
+    click.secho("Done.", fg="green")
 
 
-# ---------------------------------------------------------------------------
-# agenticplug group
-# ---------------------------------------------------------------------------
-
+# ── agenticplug group ─────────────────────────────────────────────────
 
 @main.group()
 def agenticplug():
     """AgenticPlug broker/connector commands."""
+    pass
 
 
 @agenticplug.command()
 def whoami():
-    """Show current AgenticPlug session identity."""
-    from ecoseek_client.providers.agenticplug import AgenticPlugClient
+    """Show connected user and connector identity.
 
-    client = AgenticPlugClient()
-    info = client.whoami()
+    Reads session from AGENTICPLUG_SESSION env var or
+    ~/.config/agenticplug/session.json. Never prints tokens.
+    """
+    client = _get_client()
 
-    if not info.login:
-        click.secho("Not authenticated.", fg="yellow")
-        click.echo("Run `agenticplug login` (GitHub Device Flow) to authenticate.")
-        click.echo("See docs/agenticplug.md for setup instructions.")
-        sys.exit(1)
+    if not client.has_auth:
+        click.secho("No session token found.", fg="yellow")
+        click.echo("Set AGENTICPLUG_SESSION or run: agenticplug login")
+        click.echo()
 
-    click.secho(f"Login: {info.login}", fg="green")
-    if info.name:
-        click.echo(f"Name:  {info.name}")
-    if info.scopes:
-        click.echo(f"Scopes: {', '.join(info.scopes)}")
-    if info.default_cluster:
-        click.echo(f"Default cluster: {info.default_cluster}")
-    if info.session_expired:
-        click.secho("WARNING: Session is expired.", fg="red")
-        click.echo("Run `agenticplug login` to refresh.")
+    result = client.whoami()
+    if result.success:
+        identity = result.data.get("user") or result.data.get("connector_id", "unknown")
+        click.secho(f"Connected as: {identity}", fg="green")
+        click.echo()
+        click.echo(json.dumps(_sanitize(result.data), indent=2, default=str))
+    else:
+        click.secho(f"Error: {result.error}", fg="red", err=True)
+
+
+@agenticplug.command()
+def health():
+    """Check connector health."""
+    client = _get_client()
+    result = client.health()
+    if result.success:
+        click.secho("Connector: healthy", fg="green")
+    else:
+        click.secho(f"Connector: down — {result.error}", fg="red")
+    _print_result(result)
+
+
+@agenticplug.command()
+def status():
+    """Full status: health, capabilities, and HPC queue (if auth)."""
+    client = _get_client()
+    result = client.status()
+
+    if not result.success:
+        click.secho("Some checks failed:", fg="yellow", err=True)
+
+    data = _sanitize(result.data)
+
+    connector = data.get("connector", {})
+    health_status = "healthy" if connector.get("healthy") else "down"
+    color = "green" if connector.get("healthy") else "red"
+    click.secho(f"Connector ({connector.get('url', '?')}): {health_status}", fg=color)
+
+    auth = data.get("auth", "none")
+    auth_color = "green" if auth == "token_configured" else "yellow"
+    click.secho(f"Auth: {auth}", fg=auth_color)
+
+    hpc = data.get("hpc", {})
+    if hpc:
+        jobs = hpc.get("jobs", [])
+        click.secho(f"HPC jobs: {len(jobs) if isinstance(jobs, list) else '?'}")
+
+    click.echo()
+    _print_result(result)
 
 
 @agenticplug.command()
 def clusters():
-    """List registered connectors on the gateway."""
-    from ecoseek_client.providers.agenticplug import AgenticPlugClient, AgenticPlugError
-
-    client = AgenticPlugClient()
-    try:
-        connectors = client.list_connectors()
-    except AgenticPlugError as exc:
-        click.secho(f"Error: {exc}", fg="red")
-        sys.exit(1)
-
-    if not connectors:
-        click.secho("No connectors discovered.", fg="yellow")
+    """List available clusters and connectors."""
+    client = _get_client()
+    result = client.clusters()
+    if not result.success:
+        click.secho(f"Error: {result.error}", fg="red", err=True)
         return
 
-    click.secho(f"Discovered {len(connectors)} connector(s):", fg="green")
-    for c in connectors:
-        icon = {"online": "[OK]", "degraded": "[!!]", "stale": "[--]"}.get(c.health, "[??]")
-        color = "green" if c.is_online else "yellow"
-        tools = ", ".join(t.get("name", "?") for t in c.tools[:5]) or "(none)"
-        click.secho(
-            f"  {icon} {c.connector_id} ({c.connector_type}) "
-            f"v{c.version} — tools: {tools}",
-            fg=color,
-        )
+    cluster_list = result.data.get("clusters", [])
+    if not cluster_list:
+        click.secho("No clusters found.", fg="yellow")
+        return
+
+    click.secho(f"Clusters ({len(cluster_list)}):", fg="green")
+    for c in cluster_list:
+        icon = "✓" if c.get("healthy") else "✗"
+        ctype = c.get("type", "?")
+        cid = c.get("id", "?")
+        extra = ""
+        if ctype == "hpc":
+            submit = "rw" if c.get("submit_enabled") else "ro"
+            extra = f" [{submit}]"
+        click.echo(f"  {icon} {cid} ({ctype}){extra}")
+
+    click.echo()
+    _print_result(result)
 
 
-@agenticplug.command()
+@agenticplug.group()
+def task():
+    """Run named tasks through the connector."""
+    pass
+
+
+@task.command(name="list")
+def task_list():
+    """List available tasks."""
+    click.secho("Available tasks:", fg="green")
+    for name, info in sorted(KNOWN_TASKS.items()):
+        click.echo(f"  {name:20s}  {info['method']:4s} {info['endpoint']:20s}  {info['description']}")
+
+
+@task.command(name="run")
 @click.argument("task_name")
-@click.option("--connector", "-c", help="Target connector ID (default: auto-resolve)")
-def task(task_name: str, connector: Optional[str] = None):
-    """Dispatch a task to the AgenticPlug gateway.
+def task_run(task_name: str):
+    """Run a named task (e.g. remote.health, hpc.status)."""
+    client = _get_client()
 
-    TASK_NAME can be a simple name (e.g., 'remote.health', 'hpc.status')
-    or a free-form task description.
-    """
-    from ecoseek_client.providers.agenticplug import (
-        AgenticPlugAuthError,
-        AgenticPlugClient,
-        AgenticPlugError,
-        resolve_connector,
-    )
-
-    client = AgenticPlugClient()
-    target = connector or resolve_connector(client)
-
-    click.echo(f"Dispatching '{task_name}' -> {target}...")
-
-    try:
-        result = client.send_task(task_name, connector_id=target)
-    except AgenticPlugAuthError as exc:
-        click.secho(f"Auth error: {exc}", fg="red")
-        sys.exit(1)
-    except AgenticPlugError as exc:
-        click.secho(f"Error: {exc}", fg="red")
+    if task_name not in KNOWN_TASKS:
+        click.secho(f"Unknown task: {task_name}", fg="red", err=True)
+        click.echo(f"Available: {', '.join(sorted(KNOWN_TASKS))}")
         sys.exit(1)
 
-    if result.status in ("accepted", "running", "completed"):
-        click.secho(f"Status: {result.status}", fg="green")
-        if result.task_id:
-            click.echo(f"Task ID: {result.task_id}")
-        if result.output:
-            click.echo(f"Output: {result.output}")
+    task_def = KNOWN_TASKS[task_name]
+    click.secho(f"Running: {task_name} — {task_def['description']}", fg="cyan")
+    click.echo(f"  {task_def['method']} {task_def['endpoint']}")
+
+    if "/hpc/" in task_def["endpoint"] and not client.has_auth:
+        click.secho("Auth required for this task. Set AGENTICPLUG_SESSION.", fg="red", err=True)
+        sys.exit(1)
+
+    result = client.task(task_name)
+    if result.success:
+        click.secho(f"  OK ({result.elapsed_ms:.0f}ms)", fg="green")
     else:
-        click.secho(f"Status: {result.status}", fg="red")
-        if result.error:
-            click.secho(f"Error: {result.error}", fg="red")
-        sys.exit(1)
+        click.secho(f"  FAILED: {result.error}", fg="red")
 
-
-# ---------------------------------------------------------------------------
-# smoke group
-# ---------------------------------------------------------------------------
-
-
-@main.group()
-def smoke():
-    """Smoke tests for remote connectivity."""
-
-
-@smoke.command()
-@click.option("--connector", "-c", help="Target connector ID")
-def remote(connector: Optional[str] = None):
-    """Full remote smoke test: health, clusters, remote.health, hpc.status."""
-    from ecoseek_client.providers.agenticplug import (
-        AgenticPlugAuthError,
-        AgenticPlugClient,
-        AgenticPlugError,
-        resolve_connector,
-    )
-
-    client = AgenticPlugClient()
-    failures = 0
-
-    def step(name: str, fn, *args) -> bool:
-        nonlocal failures
-        try:
-            result = fn(*args)
-            click.secho(f"  [OK] {name}", fg="green")
-            return True
-        except Exception as exc:
-            click.secho(f"  [FAIL] {name}: {exc}", fg="red")
-            failures += 1
-            return False
-
-    click.echo("ecoseek smoke remote")
-    click.echo("=" * 50)
-
-    # 1. Gateway health
-    step("Gateway health", lambda: _check_health(client))
-
-    # 2. List connectors
-    connectors = client.list_connectors() if step("List connectors", client.list_connectors) else []
-
-    # 3. Resolve target
-    target = connector or resolve_connector(client)
-    click.echo(f"  Target connector: {target}")
-
-    # 4. Connector health
-    if target:
-        step(f"Connector {target} health", client.get_connector, target)
-
-    # 5. Task dispatch
-    try:
-        result = client.send_task("remote.health", connector_id=target)
-        if result.status in ("accepted", "running", "completed"):
-            click.secho(f"  [OK] Task remote.health: {result.status}", fg="green")
-            if result.task_id:
-                click.echo(f"         Task ID: {result.task_id}")
-        else:
-            click.secho(f"  [FAIL] Task remote.health: {result.error}", fg="red")
-            failures += 1
-    except AgenticPlugAuthError:
-        click.secho("  [SKIP] Task dispatch (not authenticated)", fg="yellow")
-
-    # 6. HPC status (best-effort)
-    try:
-        result = client.send_task("hpc.status", connector_id=target)
-        if result.status in ("accepted", "running", "completed"):
-            click.secho(f"  [OK] Task hpc.status: {result.status}", fg="green")
-        else:
-            click.secho(f"  [WARN] Task hpc.status: {result.error}", fg="yellow")
-    except AgenticPlugAuthError:
-        click.secho("  [SKIP] Task hpc.status (not authenticated)", fg="yellow")
-
-    click.echo("=" * 50)
-    if failures == 0:
-        click.secho("All checks passed.", fg="green")
-    else:
-        click.secho(f"{failures} check(s) failed.", fg="red")
-        sys.exit(1)
-
-
-def _check_health(client) -> None:
-    """Raise if health check fails."""
-    h = client.health()
-    if h.get("status") != "ok":
-        raise RuntimeError(h.get("error", "unhealthy"))
-
-
-# ---------------------------------------------------------------------------
-# Main entry point
-# ---------------------------------------------------------------------------
+    click.echo()
+    _print_result(result)
 
 
 if __name__ == "__main__":
