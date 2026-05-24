@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import json
 import sys
+import webbrowser
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from typing import Optional
+from urllib.parse import parse_qs, urlparse
 
 import click
 
@@ -15,6 +18,7 @@ from .providers import (
     HermesOrchestrationResult,
     KNOWN_TASKS,
 )
+from .session import save_session, delete_session, default_session_path
 
 
 def _sanitize(data: dict) -> dict:
@@ -51,6 +55,150 @@ def _get_hermes() -> HermesProvider:
 def main(ctx: click.Context):
     """ecoseek — EcoSeek local client for AgenticPlug and HPC workflows."""
     ctx.ensure_object(dict)
+
+
+# ── login / logout (top-level) ────────────────────────────────────────
+
+
+def _do_login(broker_url: str, callback_port: int) -> None:
+    """Shared login logic: open browser for GitHub OAuth, capture session."""
+    broker_url = broker_url.rstrip("/")
+
+    # Tiny HTTP server to capture the session token from the OAuth callback.
+    captured: dict = {}
+    error_msg: list = []
+
+    class CallbackHandler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            parsed = urlparse(self.path)
+            params = parse_qs(parsed.query)
+
+            if "session_id" in params:
+                captured["session_id"] = params["session_id"][0]
+                captured["user"] = params.get("user", [""])[0]
+                captured["expires_at"] = params.get("expires_at", [None])[0]
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html")
+                self.end_headers()
+                self.wfile.write(
+                    b"<html><body><h2>Login successful!</h2>"
+                    b"<p>You can close this tab and return to the terminal.</p>"
+                    b"</body></html>"
+                )
+            elif "error" in params:
+                error_msg.append(params["error"][0])
+                self.send_response(400)
+                self.send_header("Content-Type", "text/html")
+                self.end_headers()
+                self.wfile.write(
+                    b"<html><body><h2>Login failed</h2>"
+                    b"<p>Check the terminal for details.</p>"
+                    b"</body></html>"
+                )
+            else:
+                self.send_response(400)
+                self.end_headers()
+
+        def log_message(self, format: str, *args: object) -> None:
+            pass  # suppress request logs
+
+    server = HTTPServer(("127.0.0.1", callback_port), CallbackHandler)
+
+    callback_url = f"http://127.0.0.1:{callback_port}/callback"
+    login_url = f"{broker_url}/auth/github/start?return_to={callback_url}"
+
+    click.echo("Opening browser for GitHub login...")
+    click.echo(f"  Broker: {broker_url}")
+    click.echo(f"  Callback: {callback_url}")
+    click.echo()
+
+    webbrowser.open(login_url)
+    click.echo("Waiting for GitHub callback (Ctrl+C to cancel)...")
+
+    # Handle exactly one request then stop
+    server.handle_request()
+    server.server_close()
+
+    if error_msg:
+        click.secho(f"Login failed: {error_msg[0]}", fg="red", err=True)
+        sys.exit(1)
+
+    if not captured.get("session_id"):
+        click.secho("Login failed: no session received.", fg="red", err=True)
+        sys.exit(1)
+
+    # Resolve user info via /v1/me
+    user_data: dict = {}
+    try:
+        client = AgenticPlugClient(base_url=broker_url, token=captured["session_id"])
+        me_result = client.me()
+        if me_result.success and me_result.data.get("user"):
+            user_data = me_result.data["user"]
+    except Exception:
+        pass
+
+    if not user_data and captured.get("user"):
+        user_data = {"login": captured["user"]}
+
+    expires_at = captured.get("expires_at")
+    if expires_at and expires_at.isdigit():
+        expires_at = int(expires_at)
+
+    session_path = save_session(
+        session_id=captured["session_id"],
+        user=user_data,
+        expires_at=expires_at,
+        broker_url=broker_url,
+    )
+
+    login_name = user_data.get("login") or user_data.get("name") or "unknown"
+    click.echo()
+    click.secho(f"Logged in as: {login_name}", fg="green", bold=True)
+    click.echo(f"  Session saved to: {session_path}")
+
+
+@main.command()
+@click.option(
+    "--broker", "-b",
+    default=None,
+    envvar="AGENTICPLUG_URL",
+    help="AgenticPlug broker URL (default: $AGENTICPLUG_URL or http://127.0.0.1:3100)",
+)
+@click.option("--port", "-p", default=18642, type=int, help="Local callback port (default: 18642)")
+def login(broker: Optional[str], port: int):
+    """Sign in with GitHub via AgenticPlug broker.
+
+    Opens a browser for GitHub OAuth. After authentication, the session
+    token is saved locally at ~/.config/agenticplug/session.json.
+
+    \b
+    Examples:
+      ecoseek login
+      ecoseek login --broker https://agenticplug.reumanlab.example.com
+    """
+    from .config import get_agenticplug_url
+    broker_url = broker or get_agenticplug_url()
+    _do_login(broker_url, port)
+
+
+@main.command()
+def logout():
+    """Sign out and delete the local session file."""
+    session_path = default_session_path()
+
+    # Try to call /logout on the broker if we have a session
+    try:
+        client = _get_client()
+        if client.has_auth:
+            client._request("POST", "/logout", auth=True)
+    except Exception:
+        pass
+
+    if delete_session():
+        click.secho("Logged out.", fg="green")
+        click.echo(f"  Removed: {session_path}")
+    else:
+        click.secho("No session file found.", fg="yellow")
 
 
 # ── doctor ────────────────────────────────────────────────────────────
@@ -137,6 +285,47 @@ def agenticplug():
     pass
 
 
+@agenticplug.command(name="login")
+@click.option("--broker", "-b", default=None, envvar="AGENTICPLUG_URL",
+              help="AgenticPlug broker URL")
+@click.option("--port", "-p", default=18642, type=int, help="Local callback port")
+def agenticplug_login(broker: Optional[str], port: int):
+    """Sign in with GitHub via AgenticPlug broker (alias for: ecoseek login)."""
+    from .config import get_agenticplug_url
+    _do_login(broker or get_agenticplug_url(), port)
+
+
+@agenticplug.command(name="logout")
+def agenticplug_logout():
+    """Sign out (alias for: ecoseek logout)."""
+    try:
+        client = _get_client()
+        if client.has_auth:
+            client._request("POST", "/logout", auth=True)
+    except Exception:
+        pass
+    if delete_session():
+        click.secho("Logged out.", fg="green")
+    else:
+        click.secho("No session file found.", fg="yellow")
+
+
+@agenticplug.command(name="me")
+def agenticplug_me():
+    """Check authenticated identity via GET /v1/me (broker)."""
+    client = _get_client()
+    if not client.has_auth:
+        click.secho("No session token found. Run: ecoseek login", fg="yellow")
+        return
+    result = client.me()
+    if result.success:
+        user = result.data.get("user", {})
+        click.secho(f"Authenticated as: {user.get('login', 'unknown')}", fg="green")
+        click.echo(json.dumps(result.data, indent=2, default=str))
+    else:
+        click.secho(f"Error: {result.error}", fg="red", err=True)
+
+
 @agenticplug.command()
 def whoami():
     """Show connected user and connector identity."""
@@ -144,7 +333,7 @@ def whoami():
 
     if not client.has_auth:
         click.secho("No session token found.", fg="yellow")
-        click.echo("Set AGENTICPLUG_SESSION or run: agenticplug login")
+        click.echo("Set AGENTICPLUG_SESSION or run: ecoseek login")
         click.echo()
 
     result = client.whoami()

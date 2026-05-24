@@ -29,8 +29,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 LOGIN_HINT = (
-    "Run `agenticplug login` to create a session, then `agenticplug whoami` "
-    "to confirm it. See docs/agenticplug_device_flow.md for setup."
+    "Run `ecoseek login` to create a session, then `ecoseek agenticplug me` "
+    "to confirm it."
 )
 
 
@@ -192,6 +192,51 @@ def load_session(path: Optional[Path] = None) -> AgenticPlugSession:
         default_cluster=data.get("default_cluster"),
         raw=data,
     )
+
+
+def save_session(
+    session_id: str,
+    user: Dict[str, Any],
+    expires_at: Any = None,
+    broker_url: Optional[str] = None,
+    scopes: Optional[List[str]] = None,
+    path: Optional[Path] = None,
+) -> Path:
+    """Write a v2 session file to disk.
+
+    Creates parent directories if needed. Returns the path written.
+    """
+    resolved = Path(path).expanduser() if path else default_session_path()
+    resolved.parent.mkdir(parents=True, exist_ok=True)
+
+    data: Dict[str, Any] = {
+        "version": 2,
+        "provider": "github",
+        "user": user,
+        "session": {
+            "id": session_id,
+            "token_type": "Bearer",
+            "expires_at": expires_at,
+        },
+    }
+    if broker_url:
+        data["broker_url"] = broker_url
+    if scopes:
+        data["scopes"] = scopes
+
+    resolved.write_text(json.dumps(data, indent=2, default=str) + "\n")
+    # Restrict permissions to owner-only
+    resolved.chmod(0o600)
+    return resolved
+
+
+def delete_session(path: Optional[Path] = None) -> bool:
+    """Delete the session file. Returns True if a file was removed."""
+    resolved = Path(path).expanduser() if path else default_session_path()
+    if resolved.exists():
+        resolved.unlink()
+        return True
+    return False
 
 
 def load_session_or_none(path: Optional[Path] = None) -> Optional[AgenticPlugSession]:

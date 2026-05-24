@@ -211,6 +211,10 @@ class AgenticPlugClient:
         """GET /capabilities — full endpoint listing (no auth)."""
         return self._request("GET", "/capabilities")
 
+    def me(self) -> AgenticPlugResult:
+        """GET /v1/me — canonical authenticated identity (broker endpoint)."""
+        return self._request("GET", "/v1/me", auth=True)
+
     def whoami(self) -> AgenticPlugResult:
         """Identify the current user/session."""
         hz_result = self.healthz()
