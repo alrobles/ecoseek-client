@@ -162,7 +162,7 @@ def _do_login(broker_url: str, callback_port: int) -> None:
     "--broker", "-b",
     default=None,
     envvar="AGENTICPLUG_URL",
-    help="AgenticPlug broker URL (default: $AGENTICPLUG_URL or http://127.0.0.1:3100)",
+    help="AgenticPlug broker URL (default: session broker_url → https://broker.ecoseek.org)",
 )
 @click.option("--port", "-p", default=18642, type=int, help="Local callback port (default: 18642)")
 def login(broker: Optional[str], port: int):
@@ -174,7 +174,7 @@ def login(broker: Optional[str], port: int):
     \b
     Examples:
       ecoseek login
-      ecoseek login --broker https://agenticplug.reumanlab.example.com
+      ecoseek login --broker https://broker.ecoseek.org
     """
     from .config import get_agenticplug_url
     broker_url = broker or get_agenticplug_url()

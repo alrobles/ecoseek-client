@@ -2,10 +2,17 @@
 
 Reads environment variables and optional .env files. All secrets stay local;
 nothing is hardcoded or committed.
+
+Broker URL resolution order:
+1. AGENTICPLUG_URL env var (explicit override)
+2. broker_url from session file (~/.config/agenticplug/session.json)
+3. REMOTE_BROKER_URL (https://broker.ecoseek.org) — public remote broker
+4. LOCAL_FALLBACK_URL (http://127.0.0.1:3100) — local connector
 """
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 from typing import Optional
@@ -14,7 +21,9 @@ from typing import Optional
 # Module-level constants (imported by providers)
 # ---------------------------------------------------------------------------
 
-DEFAULT_AGENTICPLUG_URL: str = "http://127.0.0.1:3100"
+LOCAL_FALLBACK_URL: str = "http://127.0.0.1:3100"
+REMOTE_BROKER_URL: str = "https://broker.ecoseek.org"
+DEFAULT_AGENTICPLUG_URL: str = LOCAL_FALLBACK_URL
 DEFAULT_SESSION_RELATIVE: Path = Path(".config") / "agenticplug" / "session.json"
 
 # Resolved once at import time
@@ -74,9 +83,38 @@ def has_agenticplug_auth() -> bool:
 # ---------------------------------------------------------------------------
 
 
+def _broker_url_from_session() -> Optional[str]:
+    """Read broker_url from the session file without importing session module."""
+    session_path = Path.home() / DEFAULT_SESSION_RELATIVE
+    if not session_path.exists():
+        return None
+    try:
+        data = json.loads(session_path.read_text())
+        url = data.get("broker_url") or data.get("base_url")
+        if url and isinstance(url, str):
+            return url.rstrip("/")
+    except (json.JSONDecodeError, OSError):
+        pass
+    return None
+
+
 def get_agenticplug_url() -> str:
-    """Resolve the AgenticPlug gateway URL."""
-    return os.getenv("AGENTICPLUG_URL", DEFAULT_AGENTICPLUG_URL).rstrip("/")
+    """Resolve the AgenticPlug gateway URL.
+
+    Resolution order:
+    1. AGENTICPLUG_URL env var (explicit override)
+    2. broker_url from session file
+    3. https://broker.ecoseek.org (remote default)
+    """
+    env_url = os.getenv("AGENTICPLUG_URL")
+    if env_url:
+        return env_url.rstrip("/")
+
+    session_url = _broker_url_from_session()
+    if session_url:
+        return session_url
+
+    return REMOTE_BROKER_URL
 
 
 def get_agenticplug_session() -> Optional[str]:

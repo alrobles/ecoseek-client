@@ -26,10 +26,10 @@ import httpx
 
 from ecoseek_client.config import (
     AGENTICPLUG_TIMEOUT,
-    AGENTICPLUG_URL,
     AGENTICPLUG_VERIFY_SSL,
     ECOSEEK_REMOTE_CONNECTOR,
     agenticplug_token,
+    get_agenticplug_url,
 )
 from ecoseek_client.session import AgenticPlugSession, load_session_or_none
 
@@ -103,7 +103,8 @@ class AgenticPlugClient:
         timeout: Optional[int] = None,
         verify_ssl: Optional[bool] = None,
     ):
-        self.base_url = (base_url or AGENTICPLUG_URL).rstrip("/")
+        self._explicit_url = base_url
+        self.base_url = (base_url or get_agenticplug_url()).rstrip("/")
         self.timeout = timeout if timeout is not None else AGENTICPLUG_TIMEOUT
         self.verify_ssl = verify_ssl if verify_ssl is not None else AGENTICPLUG_VERIFY_SSL
         self._token: Optional[str] = token
@@ -121,6 +122,8 @@ class AgenticPlugClient:
         if sess and sess.token:
             self._session = sess
             self._token = sess.token
+            if not self._explicit_url and sess.base_url:
+                self.base_url = sess.base_url.rstrip("/")
             return self._token
         return None
 
