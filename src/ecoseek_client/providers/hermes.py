@@ -257,11 +257,17 @@ class HermesProvider:
         elapsed = (time.monotonic() - t0) * 1000
 
         if not result.success:
+            # Surface the error so callers (CLI) can display it.
+            err_detail = result.error or ""
+            broker_err = (result.data or {}).get("error", "")
+            if isinstance(broker_err, dict):
+                broker_err = broker_err.get("message", broker_err.get("code", ""))
+            err_msg = str(broker_err or err_detail or f"HTTP {result.status_code}")
             return HermesResponse(
                 message=HermesMessage(role="assistant", content=""),
                 finish_reason="error",
                 elapsed_ms=elapsed,
-                raw={"error": result.error},
+                raw={"error": err_msg, "status_code": result.status_code},
             )
 
         data = result.data or {}
