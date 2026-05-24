@@ -568,6 +568,12 @@ def chat(message: str):
         {"role": "user", "content": message}
     ])
 
+    if response.finish_reason == "error":
+        err = response.raw.get("error", "unknown error")
+        code = response.raw.get("status_code", "")
+        click.secho(f"Hermes error: {err}" + (f" (HTTP {code})" if code else ""), fg="red", err=True)
+        sys.exit(1)
+
     click.secho("Hermes:", fg="cyan", bold=True)
     click.echo(response.message.content)
     if response.tool_calls:
