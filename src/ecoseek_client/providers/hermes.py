@@ -224,6 +224,7 @@ class HermesProvider:
         self,
         messages: List[Dict[str, str]],
         tools: Optional[List[Dict[str, Any]]] = None,
+        model: Optional[str] = None,
         stream: bool = False,
     ) -> HermesResponse:
         """Send a chat completion request through Hermes.
@@ -231,6 +232,7 @@ class HermesProvider:
         Args:
             messages: List of {"role": "...", "content": "..."} dicts.
             tools: Optional tool definitions for function calling.
+            model: Model identifier (default: openclaw/main).
             stream: If True, stream the response (not yet implemented).
 
         Returns:
@@ -238,7 +240,10 @@ class HermesProvider:
         """
         t0 = time.monotonic()
 
-        body: Dict[str, Any] = {"messages": messages}
+        body: Dict[str, Any] = {
+            "model": model or "openclaw/main",
+            "messages": messages,
+        }
         if tools:
             body["tools"] = tools
 
