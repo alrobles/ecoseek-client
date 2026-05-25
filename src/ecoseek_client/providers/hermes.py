@@ -50,9 +50,11 @@ class HermesResponse:
     message: HermesMessage
     tool_calls: List[HermesToolCall] = field(default_factory=list)
     finish_reason: str = "stop"
-    usage: Dict[str, int] = field(default_factory=dict)
+    usage: Dict[str, Any] = field(default_factory=dict)
     elapsed_ms: float = 0.0
     raw: Dict[str, Any] = field(default_factory=dict)
+    hermes_trace: Optional[Dict[str, Any]] = None
+    cached_tokens: Optional[int] = None
 
 
 @dataclass
@@ -226,26 +228,33 @@ class HermesProvider:
         tools: Optional[List[Dict[str, Any]]] = None,
         model: Optional[str] = None,
         stream: bool = False,
+        trace: bool = False,
     ) -> HermesResponse:
         """Send a chat completion request through Hermes.
 
         Args:
             messages: List of {"role": "...", "content": "..."} dicts.
             tools: Optional tool definitions for function calling.
-            model: Model identifier (default: openclaw/main).
+            model: Model identifier. Options:
+                - "hermes-agent" (default): full agentic loop with tools/memory
+                - "hermes-fast": bypass agent loop, sub-second TTFT
+                - "hermes-reasoner": bypass + thinking mode (reasoning_content)
             stream: If True, stream the response (not yet implemented).
+            trace: If True, request hermes_trace telemetry in the response.
 
         Returns:
-            HermesResponse with message, tool_calls, usage.
+            HermesResponse with message, tool_calls, usage, hermes_trace, cached_tokens.
         """
         t0 = time.monotonic()
 
         body: Dict[str, Any] = {
-            "model": model or "openclaw/main",
+            "model": model or "hermes-agent",
             "messages": messages,
         }
         if tools:
             body["tools"] = tools
+        if trace:
+            body["hermes"] = {"trace": True}
 
         result = self._client._request(
             "POST",
@@ -274,6 +283,8 @@ class HermesProvider:
         choices = data.get("choices", [{}])
         choice = choices[0] if choices else {}
         msg_data = choice.get("message", {})
+        usage = data.get("usage", {})
+        prompt_details = usage.get("prompt_tokens_details") or {}
 
         return HermesResponse(
             message=HermesMessage(
@@ -291,9 +302,11 @@ class HermesProvider:
                 for tc in msg_data.get("tool_calls", [])
             ],
             finish_reason=choice.get("finish_reason", "stop"),
-            usage=data.get("usage", {}),
+            usage=usage,
             elapsed_ms=elapsed,
             raw=data,
+            hermes_trace=data.get("hermes_trace"),
+            cached_tokens=prompt_details.get("cached_tokens"),
         )
 
     # ── Convenience ───────────────────────────────────────────────────
