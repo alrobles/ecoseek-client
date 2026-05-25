@@ -557,16 +557,27 @@ def orchestrate(task_text: Optional[str], mode: str, species: Optional[str], reg
 
 @hermes.command()
 @click.argument("message")
-def chat(message: str):
+@click.option(
+    "--model", "-m",
+    type=click.Choice(["hermes-agent", "hermes-fast", "hermes-reasoner"], case_sensitive=False),
+    default="hermes-agent",
+    help="Hermes model: agent (full loop), fast (bypass, sub-second), reasoner (bypass + thinking).",
+)
+@click.option("--trace", is_flag=True, default=False, help="Request hermes_trace telemetry.")
+def chat(message: str, model: str, trace: bool):
     """Send a message to Hermes chat.
 
-    Example:
+    Examples:
       ecoseek hermes chat "What ecological tools are available?"
+      ecoseek hermes chat --model hermes-fast "say pong"
+      ecoseek hermes chat --model hermes-reasoner --trace "Prove sqrt(2) is irrational"
     """
     provider = _get_hermes()
-    response = provider.chat([
-        {"role": "user", "content": message}
-    ])
+    response = provider.chat(
+        [{"role": "user", "content": message}],
+        model=model,
+        trace=trace,
+    )
 
     if response.finish_reason == "error":
         err = response.raw.get("error", "unknown error")
@@ -581,6 +592,32 @@ def chat(message: str):
         click.secho("Tool calls:", fg="yellow")
         for tc in response.tool_calls:
             click.echo(f"  {tc.name}({json.dumps(tc.arguments)})")
+
+    # Display usage with cached_tokens if available
+    if response.usage:
+        click.echo()
+        click.secho("Usage:", fg="blue")
+        click.echo(f"  Prompt: {response.usage.get('prompt_tokens', 0)} tokens")
+        click.echo(f"  Completion: {response.usage.get('completion_tokens', 0)} tokens")
+        click.echo(f"  Total: {response.usage.get('total_tokens', 0)} tokens")
+        if response.cached_tokens is not None:
+            click.echo(f"  Cached: {response.cached_tokens} tokens")
+
+    # Display hermes_trace if available
+    if response.hermes_trace:
+        click.echo()
+        click.secho("Hermes Trace:", fg="magenta")
+        loop = response.hermes_trace.get("agent_loop", {})
+        if loop:
+            click.echo(f"  Iterations: {loop.get('iterations', 0)}")
+            click.echo(f"  Total: {loop.get('total_ms', 0)}ms")
+            llm_calls = loop.get("llm_calls", [])
+            if llm_calls:
+                click.echo(f"  LLM calls: {len(llm_calls)}")
+            tool_calls_trace = loop.get("tool_calls", [])
+            if tool_calls_trace:
+                names = [tc.get("name", "?") for tc in tool_calls_trace]
+                click.echo(f"  Tools: {', '.join(names)}")
 
 
 # ── smoke group ───────────────────────────────────────────────────────
