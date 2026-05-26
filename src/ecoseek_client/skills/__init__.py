@@ -2,7 +2,7 @@
 
 Skills are loaded from Markdown definitions that Hermes can use as
 system prompts or procedural knowledge. Built on patterns from
-awesome-openclaw-skills and the alrobles/knowledgebase.
+the alrobles/knowledgebase.
 
 Structure:
 - Each skill is a .md file in the definitions/ directory
